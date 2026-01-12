@@ -3,15 +3,15 @@
 
 function getDB() {
     try {
-        // Standart MongoDB Driver Bağlantısı
+        // Standard MongoDB driver connection
         $manager = new MongoDB\Driver\Manager("mongodb://localhost:27017");
         return $manager;
     } catch (Exception $e) {
-        die("Veritabanı Hatası: " . $e->getMessage());
+        die("Database error: " . $e->getMessage());
     }
 }
 
-// Veri eklemek için yardımcı fonksiyon (Framework kullanmadığımız için elle yazıyoruz)
+// Helper to insert one document (no framework, kept minimal)
 function insertOne($collection, $document) {
     $bulk = new MongoDB\Driver\BulkWrite;
     $bulk->insert($document);
@@ -19,11 +19,28 @@ function insertOne($collection, $document) {
     $manager->executeBulkWrite("fotogaleri.$collection", $bulk);
 }
 
-// Veri çekmek için yardımcı fonksiyon
+// Helper to fetch documents
 function findAll($collection, $filter = [], $options = []) {
     $manager = getDB();
     $query = new MongoDB\Driver\Query($filter, $options);
     $cursor = $manager->executeQuery("fotogaleri.$collection", $query);
     return $cursor;
 }
-?>
+
+function countDocuments($collection, $filter = []) {
+    $manager = getDB();
+    $command = new MongoDB\Driver\Command([
+        'count' => $collection,
+        'query' => $filter,
+    ]);
+    $cursor = $manager->executeCommand('fotogaleri', $command);
+    $result = current($cursor->toArray());
+    return (int)($result->n ?? 0);
+}
+
+function deleteOne($collection, $filter) {
+    $bulk = new MongoDB\Driver\BulkWrite;
+    $bulk->delete($filter, ['limit' => 1]);
+    $manager = getDB();
+    $manager->executeBulkWrite("fotogaleri.$collection", $bulk);
+}

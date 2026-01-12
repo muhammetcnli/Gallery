@@ -1,76 +1,528 @@
 <?php
-// src/controllers.php
 
-function gallery_action() {
-    // Veritabanından resimleri çek
-    return findAll('photos');
+// Simple flash message + redirect helper.
+function flash_and_redirect($message, $location, $type = 'info') {
+    $_SESSION['flash_message'] = $message;
+    $_SESSION['flash_type'] = $type;
+    header("Location: $location");
+    exit;
+}
+
+// Logged-in user id from session (or null).
+function current_user_id() {
+    return isset($_SESSION['user_id']) ? (string)$_SESSION['user_id'] : null;
+}
+
+// Logged-in username/login from session (or null).
+function current_user_login() {
+    return isset($_SESSION['user_login']) ? (string)$_SESSION['user_login'] : null;
+}
+
+// Parse a positive integer safely (used for quantities/pagination).
+function parse_positive_int($value, $default) {
+    $n = filter_var($value, FILTER_VALIDATE_INT);
+    if ($n === false || $n <= 0) {
+        return $default;
+    }
+    return (int)$n;
+}
+
+// Get saved cart items from session.
+function saved_items() {
+    $items = $_SESSION['saved_items'] ?? [];
+    return is_array($items) ? $items : [];
+}
+
+// Total quantity across all saved items.
+function saved_total_count() {
+    $total = 0;
+    foreach (saved_items() as $qty) {
+        $q = (int)$qty;
+        if ($q > 0) {
+            $total += $q;
+        }
+    }
+    return $total;
+}
+
+// Compute thumbnail/full URLs (watermark/thumbnail fallback).
+function photo_urls($filename) {
+    $name = basename((string)$filename);
+    if ($name === '') {
+        return ['full' => '', 'thumb' => ''];
+    }
+
+    $wmPath = __DIR__ . '/../public/images/watermarked/' . $name;
+    $thumbPath = __DIR__ . '/../public/images/thumbnails/' . $name;
+
+    $full = is_file($wmPath) ? ('images/watermarked/' . $name) : ('images/' . $name);
+    $thumb = is_file($thumbPath) ? ('images/thumbnails/' . $name) : ('images/' . $name);
+
+    return ['full' => $full, 'thumb' => $thumb];
+}
+
+// Safe Mongo ObjectId parsing.
+function oid_from_string($id) {
+    try {
+        return new MongoDB\BSON\ObjectId($id);
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+// Small helper for image-type checks.
+function is_jpeg_type($type) {
+    $t = strtolower((string)$type);
+    return ($t === 'jpg' || $t === 'jpeg');
+}
+
+function gallery_filter_for_user($userId) {
+    // Guests see public; logged-in users also see their own private uploads.
+    if ($userId === null) {
+        return [
+            '$or' => [
+                ['visibility' => 'public'],
+                ['visibility' => ['$exists' => false]],
+                ['visibility' => null],
+            ],
+        ];
+    }
+
+    return [
+        '$or' => [
+            ['visibility' => 'public'],
+            ['visibility' => ['$exists' => false]],
+            ['visibility' => null],
+            ['visibility' => 'private', 'owner_user_id' => $userId],
+        ],
+    ];
+}
+
+function gallery_action($page = 1, $perPage = 12) {
+    // Returns paginated photos for the gallery.
+    $userId = current_user_id();
+    $filter = gallery_filter_for_user($userId);
+
+    $total = countDocuments('photos', $filter);
+    $totalPages = max(1, (int)ceil($total / $perPage));
+    $page = min(max(1, $page), $totalPages);
+    $skip = ($page - 1) * $perPage;
+
+    $photos = findAll('photos', $filter, [
+        'sort' => ['created_at' => -1],
+        'skip' => $skip,
+        'limit' => $perPage,
+    ]);
+
+    return [
+        'photos' => $photos,
+        'page' => $page,
+        'perPage' => $perPage,
+        'total' => $total,
+        'totalPages' => $totalPages,
+    ];
 }
 
 function upload_action() {
+    // Handles photo upload + validation, then stores metadata in MongoDB.
     $targetDir = __DIR__ . '/../public/images/';
     $thumbDir = __DIR__ . '/../public/images/thumbnails/';
+    $watermarkDir = __DIR__ . '/../public/images/watermarked/';
     
-    // Dosya seçildi mi?
+    if (!is_dir($targetDir)) mkdir($targetDir, 0777, true);
+    if (!is_dir($thumbDir)) mkdir($thumbDir, 0777, true);
+    if (!is_dir($watermarkDir)) mkdir($watermarkDir, 0777, true);
+
     if (!isset($_FILES['image']) || $_FILES['image']['error'] != 0) {
-        echo "Dosya seçilmedi veya hata oluştu.";
-        return;
+        flash_and_redirect('No file selected or upload error occurred.', 'index.php?action=upload', 'danger');
     }
 
-    $fileName = basename($_FILES['image']['name']);
+    $originalName = $_FILES['image']['name'] ?? '';
+    $fileType = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+
+    $isTypeValid = in_array($fileType, ['jpg', 'jpeg', 'png'], true);
+    $isSizeValid = (($_FILES['image']['size'] ?? 0) <= 1048576);
+
+    if (!$isTypeValid && !$isSizeValid) {
+        flash_and_redirect('Invalid file type and file size exceeds 1MB. Only JPG/PNG up to 1MB is allowed.', 'index.php?action=upload', 'danger');
+    }
+    if (!$isTypeValid) {
+        flash_and_redirect('Only JPG and PNG files are allowed.', 'index.php?action=upload', 'danger');
+    }
+    if (!$isSizeValid) {
+        flash_and_redirect('File size must be 1MB or less.', 'index.php?action=upload', 'danger');
+    }
+
+    $fileName = uniqid('img_', true) . '.' . $fileType;
     $targetFile = $targetDir . $fileName;
-    $fileType = strtolower(pathinfo($targetFile, PATHINFO_EXTENSION));
 
-    // 1. Validasyon: Sadece JPG ve PNG [cite: 41]
-    if ($fileType != "jpg" && $fileType != "png" && $fileType != "jpeg") {
-        die("Sadece JPG ve PNG dosyaları yüklenebilir.");
+    if (!move_uploaded_file($_FILES['image']['tmp_name'], $targetFile)) {
+        flash_and_redirect('Upload failed while saving the file.', 'index.php?action=upload', 'danger');
     }
 
-    // 2. Validasyon: Boyut (1MB) [cite: 42]
-    if ($_FILES['image']['size'] > 1048576) {
-        die("Dosya boyutu 1MB'dan büyük olamaz.");
+    // Generate thumbnail (200x125).
+    create_thumbnail($targetFile, $thumbDir . $fileName, $fileType);
+
+    // Generate watermarked copy used for full-size preview.
+    create_watermarked($targetFile, $watermarkDir . $fileName, $fileType, 'Photo Gallery');
+
+    $title = trim($_POST['title'] ?? '');
+    if ($title === '') {
+        $title = 'Untitled';
     }
 
-    // Dosyayı kaydet
-    if (move_uploaded_file($_FILES['image']['tmp_name'], $targetFile)) {
-        
-        // 3. Thumbnail Oluşturma (GD Library) [cite: 47, 48]
-        create_thumbnail($targetFile, $thumbDir . $fileName, $fileType);
-
-        // 4. Veritabanına Kayıt [cite: 61]
-        $document = [
-            'filename' => $fileName,
-            'title' => $_POST['title'] ?? 'Adsız',
-            'author' => $_POST['author'] ?? 'Anonim',
-            'created_at' => new MongoDB\BSON\UTCDateTime()
-        ];
-        insertOne('photos', $document);
-
-        header("Location: index.php?action=gallery");
-        exit;
-    } else {
-        echo "Dosya yüklenirken bir hata oluştu.";
+    $userLogin = current_user_login();
+    $author = trim($_POST['author'] ?? '');
+    if ($userLogin !== null) {
+        $author = $userLogin;
     }
+    if ($author === '') {
+        $author = 'Anonymous';
+    }
+
+    $visibility = 'public';
+    if ($userLogin !== null) {
+        $posted = ($_POST['visibility'] ?? 'public');
+        $visibility = ($posted === 'private') ? 'private' : 'public';
+    }
+
+    $document = [
+        'filename' => $fileName,
+        'title' => $title,
+        'author' => $author,
+        'created_at' => new MongoDB\BSON\UTCDateTime(),
+        'visibility' => $visibility,
+        'owner_user_id' => current_user_id(),
+    ];
+    insertOne('photos', $document);
+
+    flash_and_redirect('Photo uploaded successfully.', 'index.php?action=gallery', 'success');
 }
 
 function create_thumbnail($src, $dest, $type) {
+    // Creates a 200x125 thumbnail using GD.
     list($width, $height) = getimagesize($src);
     $newwidth = 200;
     $newheight = 125;
 
     $thumb = imagecreatetruecolor($newwidth, $newheight);
 
-    if ($type == 'jpg' || $type == 'jpeg') {
-        $source = imagecreatefromjpeg($src);
-    } else {
-        $source = imagecreatefrompng($src);
-    }
+    $isJpeg = is_jpeg_type($type);
+    $source = $isJpeg ? imagecreatefromjpeg($src) : imagecreatefrompng($src);
 
     imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
 
-    if ($type == 'jpg' || $type == 'jpeg') {
-        imagejpeg($thumb, $dest);
-    } else {
-        imagepng($thumb, $dest);
+    $isJpeg ? imagejpeg($thumb, $dest) : imagepng($thumb, $dest);
+
+    imagedestroy($thumb);
+    if (isset($source)) {
+        $isGdImage = function_exists('class_exists') && class_exists('GdImage') && ($source instanceof GdImage);
+        if ($isGdImage || is_resource($source)) {
+            imagedestroy($source);
+        }
     }
 }
-?>
+
+function create_watermarked($src, $dest, $type, $text) {
+    // Adds a simple text watermark using GD.
+    list($width, $height) = getimagesize($src);
+
+    $isJpeg = is_jpeg_type($type);
+    if ($isJpeg) {
+        $img = imagecreatefromjpeg($src);
+    } else {
+        $img = imagecreatefrompng($src);
+        imagealphablending($img, true);
+        imagesavealpha($img, true);
+    }
+
+    $margin = 10;
+    $font = 5;
+    $textWidth = imagefontwidth($font) * strlen($text);
+    $textHeight = imagefontheight($font);
+    $x = max($margin, $width - $textWidth - $margin);
+    $y = max($margin, $height - $textHeight - $margin);
+
+    $shadow = imagecolorallocatealpha($img, 0, 0, 0, 90);
+    $color = imagecolorallocatealpha($img, 255, 255, 255, 70);
+    imagestring($img, $font, $x + 1, $y + 1, $text, $shadow);
+    imagestring($img, $font, $x, $y, $text, $color);
+
+    $isJpeg ? imagejpeg($img, $dest) : imagepng($img, $dest);
+
+    imagedestroy($img);
+}
+
+function register_action() {
+    // Creates a new user account (hash password + save profile photo thumbnail).
+    $login = trim($_POST['login'] ?? '');
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $repeat_password = $_POST['repeat_password'] ?? '';
+
+        if ($login === '' || $email === '') {
+            flash_and_redirect('Login and email are required.', 'index.php?action=register', 'danger');
+        }
+
+        if ($password !== $repeat_password) {
+            flash_and_redirect('Passwords do not match.', 'index.php?action=register', 'danger');
+        }
+
+        $existing = findAll('users', ['login' => $login]);
+        if (!empty($existing->toArray())) {
+            flash_and_redirect('That username is already taken.', 'index.php?action=register', 'warning');
+        }
+
+        // Profile picture is required
+        if (!isset($_FILES['profile_pic']) || ($_FILES['profile_pic']['error'] ?? 1) !== 0) {
+            flash_and_redirect('Profile picture is required.', 'index.php?action=register', 'danger');
+        }
+
+        $uploadDir = __DIR__ . '/../public/images/ProfilesFoto/';
+        if (!is_dir($uploadDir)) {
+            mkdir($uploadDir, 0777, true);
+        }
+
+        $tmpName = $_FILES['profile_pic']['tmp_name'];
+        $extension = strtolower(pathinfo($_FILES['profile_pic']['name'], PATHINFO_EXTENSION));
+        if ($extension !== 'jpg' && $extension !== 'jpeg' && $extension !== 'png') {
+            flash_and_redirect('Profile picture must be JPG or PNG.', 'index.php?action=register', 'danger');
+        }
+
+        $profileThumbName = uniqid('profile_', true) . '.' . $extension;
+        create_thumbnail($tmpName, $uploadDir . $profileThumbName, $extension);
+
+        $user = [
+            'login' => $login,
+            'email' => $email,
+            'password' => password_hash($password, PASSWORD_DEFAULT),
+            'profile_image' => $profileThumbName
+        ];
+        
+        insertOne('users', $user);
+
+    flash_and_redirect('Registration successful. You can now log in.', 'index.php?action=login', 'success');
+}
+
+function login_action() {
+    // Authenticates user and stores identity in session.
+    if (isset($_SESSION['user_id'])) {
+        flash_and_redirect('You are already logged in.', 'index.php?action=gallery', 'info');
+    }
+
+    $login = trim($_POST['login'] ?? '');
+    $password = $_POST['password'] ?? '';
+
+        if ($login === '' || $password === '') {
+            flash_and_redirect('Login and password are required.', 'index.php?action=login', 'danger');
+        }
+
+        $cursor = findAll('users', ['login' => $login]);
+        $users = $cursor->toArray();
+
+        if (count($users) > 0) {
+            $user = $users[0];
+            if (password_verify($password, $user->password)) {
+                session_regenerate_id(true);
+                $_SESSION['user_id'] = (string)$user->_id;
+                $_SESSION['user_login'] = $user->login;
+                if (isset($user->profile_image)) {
+                    $_SESSION['user_profile_image'] = $user->profile_image;
+                }
+                flash_and_redirect('Login successful.', 'index.php?action=gallery', 'success');
+            }
+        }
+
+    flash_and_redirect('Invalid username or password.', 'index.php?action=login', 'danger');
+}
+
+function logout_action() {
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+    }
+    session_destroy();
+    session_start();
+    flash_and_redirect('You have been logged out.', 'index.php?action=login', 'info');
+}
+
+function save_selected_action() {
+    // Saves selected photos into session (cart-like) with quantity.
+    $selected = $_POST['selected'] ?? [];
+    $qtyMap = $_POST['qty'] ?? [];
+
+    if (!is_array($selected)) {
+        $selected = [];
+    }
+    if (!is_array($qtyMap)) {
+        $qtyMap = [];
+    }
+
+    $items = saved_items();
+    foreach ($selected as $id) {
+        $id = (string)$id;
+        $qty = parse_positive_int($qtyMap[$id] ?? 1, 1);
+        $items[$id] = $qty;
+    }
+
+    $_SESSION['saved_items'] = $items;
+    flash_and_redirect('Saved selection updated.', 'index.php?action=gallery', 'success');
+}
+
+function remove_saved_action() {
+    $selected = $_POST['selected'] ?? [];
+    if (!is_array($selected)) {
+        $selected = [];
+    }
+
+    $items = saved_items();
+    foreach ($selected as $id) {
+        $id = (string)$id;
+        unset($items[$id]);
+    }
+
+    $_SESSION['saved_items'] = $items;
+    flash_and_redirect('Removed selected items from saved.', 'index.php?action=saved', 'info');
+}
+
+function saved_action() {
+    // Loads saved (cart) photos and keeps session consistent.
+    $items = saved_items();
+    $ids = array_keys($items);
+
+    $objectIds = [];
+    foreach ($ids as $id) {
+        $oid = oid_from_string((string)$id);
+        if ($oid !== null) {
+            $objectIds[] = $oid;
+        }
+    }
+
+    $photos = [];
+    if (!empty($objectIds)) {
+        $filter = gallery_filter_for_user(current_user_id());
+        $filter['_id'] = ['$in' => $objectIds];
+        $cursor = findAll('photos', $filter, ['sort' => ['created_at' => -1]]);
+        $photos = $cursor->toArray();
+    }
+
+    // Cleanup: remove stale saved IDs that no longer exist / not visible
+    if (!empty($items)) {
+        $found = [];
+        foreach ($photos as $p) {
+            if (isset($p->_id)) {
+                $found[(string)$p->_id] = true;
+            }
+        }
+        $changed = false;
+        foreach (array_keys($items) as $id) {
+            if (!isset($found[$id])) {
+                unset($items[$id]);
+                $changed = true;
+            }
+        }
+        if ($changed) {
+            $_SESSION['saved_items'] = $items;
+        }
+    }
+
+    return [
+        'items' => $items,
+        'photos' => $photos,
+        'totalCount' => saved_total_count(),
+    ];
+}
+
+function delete_photo_action() {
+    $userId = current_user_id();
+    if ($userId === null) {
+        flash_and_redirect('Please log in to delete photos.', 'index.php?action=login', 'warning');
+    }
+
+    $id = isset($_POST['id']) ? (string)$_POST['id'] : '';
+    $oid = oid_from_string($id);
+    if ($oid === null) {
+        flash_and_redirect('Invalid photo id.', 'index.php?action=gallery', 'danger');
+    }
+
+    $cursor = findAll('photos', ['_id' => $oid], ['limit' => 1]);
+    $arr = $cursor->toArray();
+    if (count($arr) === 0) {
+        flash_and_redirect('Photo not found.', 'index.php?action=gallery', 'warning');
+    }
+
+    $photo = $arr[0];
+    $owner = isset($photo->owner_user_id) ? (string)$photo->owner_user_id : null;
+    if ($owner === null || $owner !== $userId) {
+        flash_and_redirect('You can delete only your own uploads.', 'index.php?action=gallery', 'danger');
+    }
+
+    $filename = isset($photo->filename) ? basename((string)$photo->filename) : '';
+    if ($filename === '') {
+        flash_and_redirect('Invalid photo filename.', 'index.php?action=gallery', 'danger');
+    }
+
+    deleteOne('photos', ['_id' => $oid, 'owner_user_id' => $userId]);
+
+    $paths = [
+        __DIR__ . '/../public/images/' . $filename,
+        __DIR__ . '/../public/images/thumbnails/' . $filename,
+        __DIR__ . '/../public/images/watermarked/' . $filename,
+    ];
+    foreach ($paths as $p) {
+        if (is_file($p)) {
+            @unlink($p);
+        }
+    }
+
+    // Keep saved-items consistent
+    $items = saved_items();
+    if (isset($items[$id])) {
+        unset($items[$id]);
+        $_SESSION['saved_items'] = $items;
+    }
+
+    flash_and_redirect('Photo deleted.', 'index.php?action=gallery', 'success');
+}
+
+function profile_action() {
+    $userId = current_user_id();
+    if ($userId === null) {
+        flash_and_redirect('Please log in to view your profile.', 'index.php?action=login', 'warning');
+    }
+
+    $login = current_user_login();
+    $profileImage = isset($_SESSION['user_profile_image']) ? (string)$_SESSION['user_profile_image'] : null;
+
+    $cursor = findAll('photos', ['owner_user_id' => $userId], ['sort' => ['created_at' => -1], 'limit' => 100]);
+    $myPhotos = $cursor->toArray();
+
+    return [
+        'login' => $login,
+        'profileImage' => $profileImage,
+        'myPhotos' => $myPhotos,
+    ];
+}
+
+function search_action() {
+    // view-only
+}
+
+function search_ajax_action() {
+    // AJAX endpoint: returns an HTML fragment of matching thumbnails.
+    header('Content-Type: text/html; charset=utf-8');
+
+    $q = trim($_GET['q'] ?? '');
+    $photos = [];
+
+    if ($q !== '') {
+        $userId = current_user_id();
+        $filter = gallery_filter_for_user($userId);
+        $filter['title'] = new MongoDB\BSON\Regex(preg_quote($q), 'i');
+        $cursor = findAll('photos', $filter, ['sort' => ['created_at' => -1], 'limit' => 24]);
+        $photos = $cursor->toArray();
+    }
+
+    include __DIR__ . '/../views/partials/search_results.php';
+}
