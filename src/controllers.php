@@ -1,5 +1,8 @@
 <?php
 
+// Business/utility functions (image processing, filtering, helpers)
+require_once __DIR__ . '/services.php';
+
 // Simple flash message + redirect helper.
 function flash_and_redirect($message, $location, $type = 'info') {
     $_SESSION['flash_message'] = $message;
@@ -16,15 +19,6 @@ function current_user_id() {
 // Logged-in username/login from session (or null).
 function current_user_login() {
     return isset($_SESSION['user_login']) ? (string)$_SESSION['user_login'] : null;
-}
-
-// Parse a positive integer safely (used for quantities/pagination).
-function parse_positive_int($value, $default) {
-    $n = filter_var($value, FILTER_VALIDATE_INT);
-    if ($n === false || $n <= 0) {
-        return $default;
-    }
-    return (int)$n;
 }
 
 // Get saved cart items from session.
@@ -45,58 +39,8 @@ function saved_total_count() {
     return $total;
 }
 
-// Compute thumbnail/full URLs (watermark/thumbnail fallback).
-function photo_urls($filename) {
-    $name = basename((string)$filename);
-    if ($name === '') {
-        return ['full' => '', 'thumb' => ''];
-    }
-
-    $wmPath = __DIR__ . '/../public/images/watermarked/' . $name;
-    $thumbPath = __DIR__ . '/../public/images/thumbnails/' . $name;
-
-    $full = is_file($wmPath) ? ('images/watermarked/' . $name) : ('images/' . $name);
-    $thumb = is_file($thumbPath) ? ('images/thumbnails/' . $name) : ('images/' . $name);
-
-    return ['full' => $full, 'thumb' => $thumb];
-}
-
-// Safe Mongo ObjectId parsing.
-function oid_from_string($id) {
-    try {
-        return new MongoDB\BSON\ObjectId($id);
-    } catch (Exception $e) {
-        return null;
-    }
-}
-
-// Small helper for image-type checks.
-function is_jpeg_type($type) {
-    $t = strtolower((string)$type);
-    return ($t === 'jpg' || $t === 'jpeg');
-}
-
-function gallery_filter_for_user($userId) {
-    // Guests see public; logged-in users also see their own private uploads.
-    if ($userId === null) {
-        return [
-            '$or' => [
-                ['visibility' => 'public'],
-                ['visibility' => ['$exists' => false]],
-                ['visibility' => null],
-            ],
-        ];
-    }
-
-    return [
-        '$or' => [
-            ['visibility' => 'public'],
-            ['visibility' => ['$exists' => false]],
-            ['visibility' => null],
-            ['visibility' => 'private', 'owner_user_id' => $userId],
-        ],
-    ];
-}
+// (parse_positive_int, photo_urls, oid_from_string, is_jpeg_type, gallery_filter_for_user)
+// are implemented in src/services.php
 
 function gallery_action($page = 1, $perPage = 12) {
     // Returns paginated photos for the gallery.
@@ -123,24 +67,40 @@ function gallery_action($page = 1, $perPage = 12) {
     ];
 }
 
+// Handles photo upload + validation, then stores metadata in MongoDB
 function upload_action() {
-    // Handles photo upload + validation, then stores metadata in MongoDB.
     $targetDir = __DIR__ . '/../public/images/';
     $thumbDir = __DIR__ . '/../public/images/thumbnails/';
     $watermarkDir = __DIR__ . '/../public/images/watermarked/';
     
+    // Create directories if they don't exist
     if (!is_dir($targetDir)) mkdir($targetDir, 0777, true);
     if (!is_dir($thumbDir)) mkdir($thumbDir, 0777, true);
     if (!is_dir($watermarkDir)) mkdir($watermarkDir, 0777, true);
 
-    if (!isset($_FILES['image']) || $_FILES['image']['error'] != 0) {
-        flash_and_redirect('No file selected or upload error occurred.', 'index.php?action=upload', 'danger');
+    if (!isset($_FILES['image'])) {
+        flash_and_redirect('No file selected.', 'index.php?action=upload', 'danger');
+    }
+
+    // Check for upload errors
+    $uploadErr = (int)($_FILES['image']['error'] ?? UPLOAD_ERR_NO_FILE);
+    if ($uploadErr !== UPLOAD_ERR_OK) {
+        if ($uploadErr === UPLOAD_ERR_INI_SIZE || $uploadErr === UPLOAD_ERR_FORM_SIZE) {
+            flash_and_redirect('File is too large. Maximum allowed size is 1MB.', 'index.php?action=upload', 'danger');
+        }
+        if ($uploadErr === UPLOAD_ERR_NO_FILE) {
+            flash_and_redirect('No file selected.', 'index.php?action=upload', 'danger');
+        }
+        flash_and_redirect('Upload error occurred. Please try again.', 'index.php?action=upload', 'danger');
     }
 
     $originalName = $_FILES['image']['name'] ?? '';
     $fileType = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
 
+    // Check for file type
     $isTypeValid = in_array($fileType, ['jpg', 'jpeg', 'png'], true);
+
+    // Check for file size (1MB)
     $isSizeValid = (($_FILES['image']['size'] ?? 0) <= 1048576);
 
     if (!$isTypeValid && !$isSizeValid) {
@@ -197,60 +157,6 @@ function upload_action() {
     insertOne('photos', $document);
 
     flash_and_redirect('Photo uploaded successfully.', 'index.php?action=gallery', 'success');
-}
-
-function create_thumbnail($src, $dest, $type) {
-    // Creates a 200x125 thumbnail using GD.
-    list($width, $height) = getimagesize($src);
-    $newwidth = 200;
-    $newheight = 125;
-
-    $thumb = imagecreatetruecolor($newwidth, $newheight);
-
-    $isJpeg = is_jpeg_type($type);
-    $source = $isJpeg ? imagecreatefromjpeg($src) : imagecreatefrompng($src);
-
-    imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
-
-    $isJpeg ? imagejpeg($thumb, $dest) : imagepng($thumb, $dest);
-
-    imagedestroy($thumb);
-    if (isset($source)) {
-        $isGdImage = function_exists('class_exists') && class_exists('GdImage') && ($source instanceof GdImage);
-        if ($isGdImage || is_resource($source)) {
-            imagedestroy($source);
-        }
-    }
-}
-
-function create_watermarked($src, $dest, $type, $text) {
-    // Adds a simple text watermark using GD.
-    list($width, $height) = getimagesize($src);
-
-    $isJpeg = is_jpeg_type($type);
-    if ($isJpeg) {
-        $img = imagecreatefromjpeg($src);
-    } else {
-        $img = imagecreatefrompng($src);
-        imagealphablending($img, true);
-        imagesavealpha($img, true);
-    }
-
-    $margin = 10;
-    $font = 5;
-    $textWidth = imagefontwidth($font) * strlen($text);
-    $textHeight = imagefontheight($font);
-    $x = max($margin, $width - $textWidth - $margin);
-    $y = max($margin, $height - $textHeight - $margin);
-
-    $shadow = imagecolorallocatealpha($img, 0, 0, 0, 90);
-    $color = imagecolorallocatealpha($img, 255, 255, 255, 70);
-    imagestring($img, $font, $x + 1, $y + 1, $text, $shadow);
-    imagestring($img, $font, $x, $y, $text, $color);
-
-    $isJpeg ? imagejpeg($img, $dest) : imagepng($img, $dest);
-
-    imagedestroy($img);
 }
 
 function register_action() {
