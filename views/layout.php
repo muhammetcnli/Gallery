@@ -23,7 +23,7 @@
                 <div class="navbar-nav ms-auto align-items-lg-center">
                     <a class="nav-link" href="index.php?action=gallery"><i class="bi bi-grid me-1"></i>Gallery</a>
                     <a class="nav-link" href="index.php?action=search"><i class="bi bi-search me-1"></i>Search</a>
-                    <?php // Navbar badge is a partial view (keeps layout clean). ?>
+                    <?php // Navbar badge is a partial view ?>
                     <?php include __DIR__ . '/partials/saved_badge.php'; ?>
                 
                 <?php if (isset($_SESSION['user_id'])): ?>
