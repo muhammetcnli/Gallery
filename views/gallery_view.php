@@ -7,7 +7,14 @@
     <a class="btn btn-primary" href="index.php?action=upload"><i class="bi bi-cloud-upload me-1"></i>Upload</a>
 </div>
 
-<?php $saved = function_exists('saved_items') ? saved_items() : []; ?>
+<?php $isLoggedIn = isset($_SESSION['user_id']); ?>
+<?php $saved = ($isLoggedIn && function_exists('saved_items')) ? saved_items() : []; ?>
+
+<?php if (!$isLoggedIn): ?>
+    <div class="alert alert-info">
+        Log in to save photos (saved list is stored per user).
+    </div>
+<?php endif; ?>
 
 <form action="index.php?action=save_selected" method="post">
     <div class="d-flex align-items-center justify-content-between mb-3">
@@ -51,14 +58,14 @@
                     </div>
 
                     <?php if ($idStr !== ''): ?>
-                        <div class="mt-3">
+                        <div class="mt-3 <?php echo $isLoggedIn ? '' : 'opacity-50'; ?>">
                             <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="selected[]" value="<?php echo htmlspecialchars($idStr); ?>" id="sel_<?php echo htmlspecialchars($idStr); ?>" <?php echo $checked ? 'checked' : ''; ?>>
+                                <input class="form-check-input" type="checkbox" name="selected[]" value="<?php echo htmlspecialchars($idStr); ?>" id="sel_<?php echo htmlspecialchars($idStr); ?>" <?php echo $checked ? 'checked' : ''; ?> <?php echo $isLoggedIn ? '' : 'disabled'; ?>>
                                 <label class="form-check-label" for="sel_<?php echo htmlspecialchars($idStr); ?>">Save</label>
                             </div>
                             <div class="mt-2">
                                 <label class="form-label small mb-1" for="qty_<?php echo htmlspecialchars($idStr); ?>">Quantity</label>
-                                <input class="form-control form-control-sm" type="number" min="1" name="qty[<?php echo htmlspecialchars($idStr); ?>]" id="qty_<?php echo htmlspecialchars($idStr); ?>" value="<?php echo (int)$qty; ?>">
+                                <input class="form-control form-control-sm" type="number" min="1" name="qty[<?php echo htmlspecialchars($idStr); ?>]" id="qty_<?php echo htmlspecialchars($idStr); ?>" value="<?php echo (int)$qty; ?>" <?php echo $isLoggedIn ? '' : 'disabled'; ?>>
                             </div>
                         </div>
                     <?php endif; ?>
