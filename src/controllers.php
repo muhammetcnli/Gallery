@@ -21,10 +21,83 @@ function current_user_login() {
     return isset($_SESSION['user_login']) ? (string)$_SESSION['user_login'] : null;
 }
 
+function load_saved_items_from_db_for_user($userId) {
+    $oid = oid_from_string((string)$userId);
+    if ($oid === null) {
+        return [];
+    }
+
+    $cursor = findAll('users', ['_id' => $oid], ['limit' => 1]);
+    $arr = $cursor->toArray();
+    if (count($arr) === 0) {
+        return [];
+    }
+
+    $user = $arr[0];
+    $raw = [];
+    if (isset($user->saved_items)) {
+        if (is_array($user->saved_items)) {
+            $raw = $user->saved_items;
+        } elseif (is_object($user->saved_items)) {
+            $raw = (array)$user->saved_items;
+        }
+    }
+
+    $items = [];
+    foreach ($raw as $photoId => $qty) {
+        $pid = (string)$photoId;
+        if (oid_from_string($pid) === null) {
+            continue;
+        }
+        $q = (int)$qty;
+        if ($q > 0) {
+            $items[$pid] = $q;
+        }
+    }
+    return $items;
+}
+
+function persist_saved_items_to_db_for_user($userId, $items) {
+    $oid = oid_from_string((string)$userId);
+    if ($oid === null) {
+        return;
+    }
+
+    if (!is_array($items)) {
+        $items = [];
+    }
+
+    updateOne('users',
+        ['_id' => $oid],
+        ['$set' => [
+            'saved_items' => $items,
+            'saved_updated_at' => new MongoDB\BSON\UTCDateTime(),
+        ]]
+    );
+}
+
 // Get saved cart items from session.
 function saved_items() {
+    $userId = current_user_id();
+    if ($userId === null) {
+        // DB-only saved: guests have no saved items.
+        return [];
+    }
+
     $items = $_SESSION['saved_items'] ?? [];
-    return is_array($items) ? $items : [];
+    $items = is_array($items) ? $items : [];
+
+    $loaded = ($_SESSION['saved_items_loaded'] ?? false) === true;
+    $loadedFor = isset($_SESSION['saved_items_user_id']) ? (string)$_SESSION['saved_items_user_id'] : null;
+    if ($loaded && $loadedFor === $userId) {
+        return $items;
+    }
+
+    $dbItems = load_saved_items_from_db_for_user($userId);
+    $_SESSION['saved_items'] = $dbItems;
+    $_SESSION['saved_items_loaded'] = true;
+    $_SESSION['saved_items_user_id'] = $userId;
+    return $dbItems;
 }
 
 // Total quantity across all saved items.
@@ -39,15 +112,14 @@ function saved_total_count() {
     return $total;
 }
 
-// (parse_positive_int, photo_urls, oid_from_string, is_jpeg_type, gallery_filter_for_user)
-// are implemented in src/services.php
-
 function gallery_action($page = 1, $perPage = 12) {
     // Returns paginated photos for the gallery.
     $userId = current_user_id();
     $filter = gallery_filter_for_user($userId);
 
     $total = countDocuments('photos', $filter);
+
+    // Calculate pagination
     $totalPages = max(1, (int)ceil($total / $perPage));
     $page = min(max(1, $page), $totalPages);
     $skip = ($page - 1) * $perPage;
@@ -131,6 +203,7 @@ function upload_action() {
         $title = 'Untitled';
     }
 
+    // Determine author and visibility
     $userLogin = current_user_login();
     $author = trim($_POST['author'] ?? '');
     if ($userLogin !== null) {
@@ -146,6 +219,7 @@ function upload_action() {
         $visibility = ($posted === 'private') ? 'private' : 'public';
     }
 
+    // Store metadata in MongoDB
     $document = [
         'filename' => $fileName,
         'title' => $title,
@@ -212,13 +286,16 @@ function register_action() {
 
 function login_action() {
     // Authenticates user and stores identity in session.
+
+    // If already logged in, redirect to gallery.
     if (isset($_SESSION['user_id'])) {
         flash_and_redirect('You are already logged in.', 'index.php?action=gallery', 'info');
     }
-
+    
     $login = trim($_POST['login'] ?? '');
     $password = $_POST['password'] ?? '';
 
+        // Basic validation
         if ($login === '' || $password === '') {
             flash_and_redirect('Login and password are required.', 'index.php?action=login', 'danger');
         }
@@ -235,6 +312,13 @@ function login_action() {
                 if (isset($user->profile_image)) {
                     $_SESSION['user_profile_image'] = $user->profile_image;
                 }
+
+                $userId = (string)$user->_id;
+                $dbItems = load_saved_items_from_db_for_user($userId);
+                $_SESSION['saved_items'] = $dbItems;
+                $_SESSION['saved_items_loaded'] = true;
+                $_SESSION['saved_items_user_id'] = $userId;
+
                 flash_and_redirect('Login successful.', 'index.php?action=gallery', 'success');
             }
         }
@@ -243,18 +327,20 @@ function login_action() {
 }
 
 function logout_action() {
-    $_SESSION = [];
-    if (ini_get('session.use_cookies')) {
-        $params = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
-    }
-    session_destroy();
-    session_start();
+    unset($_SESSION['user_id'], $_SESSION['user_login'], $_SESSION['user_profile_image']);
+    unset($_SESSION['saved_items'], $_SESSION['saved_items_loaded'], $_SESSION['saved_items_user_id']);
+    session_regenerate_id(true);
+    // delete 
     flash_and_redirect('You have been logged out.', 'index.php?action=login', 'info');
 }
 
 function save_selected_action() {
-    // Saves selected photos into session (cart-like) with quantity.
+    // Saves selected photos into session with quantity.
+    $userId = current_user_id();
+    if ($userId === null) {
+        flash_and_redirect('Please log in to save photos.', 'index.php?action=login', 'warning');
+    }
+
     $selected = $_POST['selected'] ?? [];
     $qtyMap = $_POST['qty'] ?? [];
 
@@ -268,15 +354,26 @@ function save_selected_action() {
     $items = saved_items();
     foreach ($selected as $id) {
         $id = (string)$id;
+        if (oid_from_string($id) === null) {
+            continue;
+        }
         $qty = parse_positive_int($qtyMap[$id] ?? 1, 1);
         $items[$id] = $qty;
     }
 
     $_SESSION['saved_items'] = $items;
+    persist_saved_items_to_db_for_user($userId, $items);
+    $_SESSION['saved_items_loaded'] = true;
+    $_SESSION['saved_items_user_id'] = $userId;
     flash_and_redirect('Saved selection updated.', 'index.php?action=gallery', 'success');
 }
 
 function remove_saved_action() {
+    $userId = current_user_id();
+    if ($userId === null) {
+        flash_and_redirect('Please log in to manage saved photos.', 'index.php?action=login', 'warning');
+    }
+
     $selected = $_POST['selected'] ?? [];
     if (!is_array($selected)) {
         $selected = [];
@@ -289,11 +386,19 @@ function remove_saved_action() {
     }
 
     $_SESSION['saved_items'] = $items;
+    persist_saved_items_to_db_for_user($userId, $items);
+    $_SESSION['saved_items_loaded'] = true;
+    $_SESSION['saved_items_user_id'] = $userId;
     flash_and_redirect('Removed selected items from saved.', 'index.php?action=saved', 'info');
 }
 
 function saved_action() {
     // Loads saved (cart) photos and keeps session consistent.
+    $userId = current_user_id();
+    if ($userId === null) {
+        flash_and_redirect('Please log in to view saved photos.', 'index.php?action=login', 'warning');
+    }
+
     $items = saved_items();
     $ids = array_keys($items);
 
@@ -307,7 +412,7 @@ function saved_action() {
 
     $photos = [];
     if (!empty($objectIds)) {
-        $filter = gallery_filter_for_user(current_user_id());
+        $filter = gallery_filter_for_user($userId);
         $filter['_id'] = ['$in' => $objectIds];
         $cursor = findAll('photos', $filter, ['sort' => ['created_at' => -1]]);
         $photos = $cursor->toArray();
@@ -330,6 +435,9 @@ function saved_action() {
         }
         if ($changed) {
             $_SESSION['saved_items'] = $items;
+            persist_saved_items_to_db_for_user($userId, $items);
+            $_SESSION['saved_items_loaded'] = true;
+            $_SESSION['saved_items_user_id'] = $userId;
         }
     }
 
@@ -341,6 +449,7 @@ function saved_action() {
 }
 
 function delete_photo_action() {
+    // Deletes a photo uploaded by the current user
     $userId = current_user_id();
     if ($userId === null) {
         flash_and_redirect('Please log in to delete photos.', 'index.php?action=login', 'warning');
@@ -412,7 +521,6 @@ function profile_action() {
 }
 
 function search_action() {
-    // view-only
 }
 
 function search_ajax_action() {
