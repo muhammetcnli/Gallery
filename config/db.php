@@ -1,5 +1,4 @@
 <?php
-// config/db.php
 
 function getDB() {
     try {
@@ -11,7 +10,7 @@ function getDB() {
     }
 }
 
-// Helper to insert one document (no framework, kept minimal)
+// Helper to insert one document
 function insertOne($collection, $document) {
     $bulk = new MongoDB\Driver\BulkWrite;
     $bulk->insert($document);
@@ -43,4 +42,12 @@ function deleteOne($collection, $filter) {
     $bulk->delete($filter, ['limit' => 1]);
     $manager = getDB();
     $manager->executeBulkWrite("fotogaleri.$collection", $bulk);
+}
+
+function updateOne($collection, $filter, $update, $options = []) {
+    $bulk = new MongoDB\Driver\BulkWrite;
+    $opts = array_merge(['multi' => false, 'upsert' => false], is_array($options) ? $options : []);
+    $bulk->update($filter, $update, $opts);
+    $manager = getDB();
+    return $manager->executeBulkWrite("fotogaleri.$collection", $bulk);
 }
