@@ -1,5 +1,5 @@
 <?php
-// Parse a positive integer safely (used for quantities/pagination).
+// Parse a positive integer safely
 function parse_positive_int($value, $default) {
     $n = filter_var($value, FILTER_VALIDATE_INT);
     if ($n === false || $n <= 0) {
@@ -8,7 +8,7 @@ function parse_positive_int($value, $default) {
     return (int)$n;
 }
 
-// Compute thumbnail/full URLs (watermark/thumbnail fallback).
+// Compute thumbnail/full URLs
 function photo_urls($filename) {
     $name = basename((string)$filename);
     if ($name === '') {
@@ -67,8 +67,10 @@ function create_thumbnail($src, $dest, $type) {
     $newwidth = 200;
     $newheight = 125;
 
+    // Create a new empty image
     $thumb = imagecreatetruecolor($newwidth, $newheight);
 
+    // Check image type and create from source
     $isJpeg = is_jpeg_type($type);
     $source = $isJpeg ? imagecreatefromjpeg($src) : imagecreatefrompng($src);
 
