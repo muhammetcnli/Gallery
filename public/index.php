@@ -1,10 +1,8 @@
 <?php
-// public/index.php
-// Stage 2 – front controller + routing.
-// Note: we use both require_once (core dependencies) and include (views/layout), as required.
+// use both require_once (core dependencies) and include (views/layout)
 session_start();
 
-// Enable error reporting (useful during development)
+// Enable error reporting
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
