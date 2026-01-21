@@ -32,8 +32,7 @@
     input.addEventListener('keyup', function () {
         clearTimeout(timer);
         timer = setTimeout(runSearch, 150);
-    });a
-
+    });
     // initial
     runSearch();
 })();
