@@ -13,7 +13,7 @@
                             <label class="form-label">Author</label>
                             <input type="text" name="author" class="form-control" value="<?php echo htmlspecialchars($_SESSION['user_login']); ?>" readonly>
                             <div class="form-text">Author is set from your account.</div>
-                        </div>a
+                        </div>
 
                         <div class="mb-3">
                             <label class="form-label">Visibility</label>
